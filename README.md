@@ -1,6 +1,6 @@
-# New-ISOFile
+# New-ISO
 
-  Create an ISO file from a source folder.
+  Create an ISO file from source files or folders with a file picker GUI.
   
   Optionally speicify a boot image and media type.
 
@@ -9,8 +9,6 @@
   https://gallery.technet.microsoft.com/scriptcenter/New-ISOFile-function-a8deeffd (link appears to be no longer valid.)
 
   # Changes:
-  * Updated to work with PowerShell 7
-  * Added a bit more error handling and verbose output.
-  * Features removed to simplify code:
-    * Clipboard support.
-    * Pipeline input.
+    - Added file open and save dialogues
+    - Auto truncate -title parameter and remove non-alphanumeric characters
+    - Simplified paramater names and module name for less keyboard travel
