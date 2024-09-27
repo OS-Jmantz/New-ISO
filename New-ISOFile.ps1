@@ -1,27 +1,28 @@
-function New-ISOFile {
+function New-ISO {
     <#
     .SYNOPSIS
         Create an ISO file from a source folder.
 
     .DESCRIPTION
         Create an ISO file from a source folder.
-        Optionally speicify a boot image and media type.
+        Optionally specify a boot image and media type.
 
         Based on original function by Chris Wu.
-        https://gallery.technet.microsoft.com/scriptcenter/New-ISOFile-function-a8deeffd (link appears to be no longer valid.)
+        https://gallery.technet.microsoft.com/scriptcenter/New-ISO-function-a8deeffd (link appears to be no longer valid.)
+
+        Further based on new module by Alistair McNair.
+        https://github.com/TheDotSource/New-ISOFile
 
         Changes:
-            - Updated to work with PowerShell 7
-            - Added a bit more error handling and verbose output.
-            - Features removed to simplify code:
-                * Clipboard support.
-                * Pipeline input.
+            - Added file open and save dialogues
+            - Auto truncate -title parameter and remove non-alphanumeric characters
+            - Simplified paramater names and module name for less keyboard travel
 
     .PARAMETER source
-        The source folder to add to the ISO.
+        The source folder to add to the ISO. If not specified, a file selection dialog will open.
 
-    .PARAMETER destinationIso
-        The ISO file to create.
+    .PARAMETER destination
+        The ISO file to create. If not specified, a file save dialog will open.
 
     .PARAMETER bootFile
         Optional. Boot file to add to the ISO.
@@ -30,7 +31,7 @@ function New-ISOFile {
         Optional. The media type of the resulting ISO (BDR, CDR etc). Defaults to DVDPLUSRW_DUALLAYER.
 
     .PARAMETER title
-        Optional. Title of the ISO file. Defaults to "untitled".
+        Optional. Title of the ISO file. Defaults to the filename provided in -destination, truncated to 15 characters and without spaces or non-alphanumeric characters.
 
     .PARAMETER force
         Optional. Force overwrite of an existing ISO file.
@@ -42,12 +43,12 @@ function New-ISOFile {
         None.
 
     .EXAMPLE
-        New-ISOFile -source c:\forIso\ -destinationIso C:\ISOs\testiso.iso
+        New-ISO -source c:\forIso\ -destination C:\ISOs\testiso.iso
 
         Simple example. Create testiso.iso with the contents from c:\forIso
 
     .EXAMPLE
-        New-ISOFile -source f:\ -destinationIso C:\ISOs\windowsServer2019Custom.iso -bootFile F:\efi\microsoft\boot\efisys.bin -title "Windows2019"
+        New-ISO -source f:\ -destination C:\ISOs\windowsServer2019Custom.iso -bootFile F:\efi\microsoft\boot\efisys.bin -title "Windows2019"
 
         Example building Windows media. Add the contents of f:\ to windowsServer2019Custom.iso. Use efisys.bin to make the disc bootable.
 
@@ -55,31 +56,65 @@ function New-ISOFile {
 
     .NOTES
         01           Alistair McNair          Initial version.
+        02           Jimmy Mantz              Add new features
 
     #>
+
     [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact="Low")]
     Param
     (
-        [parameter(Mandatory=$true,ValueFromPipeline=$false)]
+        [parameter(Mandatory=$false,ValueFromPipeline=$false)]
         [string]$source,
-        [parameter(Mandatory=$true,ValueFromPipeline=$false)]
-        [string]$destinationIso,
+        [parameter(Mandatory=$false,ValueFromPipeline=$false)]
+        [string]$destination,
         [parameter(Mandatory=$false,ValueFromPipeline=$false)]
         [string]$bootFile = $null,
         [Parameter(Mandatory=$false,ValueFromPipeline=$false)]
         [ValidateSet("CDR","CDRW","DVDRAM","DVDPLUSR","DVDPLUSRW","DVDPLUSR_DUALLAYER","DVDDASHR","DVDDASHRW","DVDDASHR_DUALLAYER","DISK","DVDPLUSRW_DUALLAYER","BDR","BDRE")]
         [string]$media = "DVDPLUSRW_DUALLAYER",
         [Parameter(Mandatory=$false,ValueFromPipeline=$false)]
-        [string]$title = "untitled",
+        [string]$title,
         [Parameter(Mandatory=$false,ValueFromPipeline=$false)]
         [switch]$force
-      )
+    )
 
     begin {
+        Add-Type -AssemblyName System.Windows.Forms
+
+        # If -source is not provided, open the file selection dialog
+        if (-not $PSBoundParameters.ContainsKey('source')) {
+            $sourceFiles = Select-Files
+            if ($sourceFiles -ne $null) {
+                $source = $sourceFiles -join ";"
+            } else {
+                Write-Host "No source files selected, exiting." -ForegroundColor Green
+                break
+            }
+        }
+
+        # If -destination is not provided, open the file save dialog
+        if (-not $PSBoundParameters.ContainsKey('destination')) {
+            $destinationFile = Select-Destination
+            if ($destinationFile -ne $null) {
+                $destination = $destinationFile
+            } else {
+                Write-Host "No destination selected, exiting." -ForegroundColor Green
+                break
+            }
+        }
+
+        # If -title is not provided, generate it from the destination filename
+        if (-not $PSBoundParameters.ContainsKey('title')) {
+            # Extract the filename from the destination path
+            $filename = [System.IO.Path]::GetFileNameWithoutExtension($destination)
+            # Remove non-alphanumeric characters and spaces
+            $filename = $filename -replace '[^a-zA-Z0-9]', ''
+            # Truncate to 15 characters
+            $title = $filename.Substring(0, [Math]::Min(15, $filename.Length))
+        }
 
         Write-Verbose ("Function start.")
-
-    } # begin
+    }
 
     process {
 
@@ -229,10 +264,10 @@ function New-ISOFile {
 
 
         ## Create target ISO, throw if file exists and -force parameter is not used.
-        if ($PSCmdlet.ShouldProcess($destinationIso)) {
+        if ($PSCmdlet.ShouldProcess($destination)) {
 
-            if (!($targetFile = New-Item -Path $destinationIso -ItemType File -Force:$Force -ErrorAction SilentlyContinue)) {
-                throw ("Cannot create file " + $destinationIso + ". Use -Force parameter to overwrite if the target file already exists.")
+            if (!($targetFile = New-Item -Path $destination -ItemType File -Force:$Force -ErrorAction SilentlyContinue)) {
+                throw ("Cannot create file " + $destination + ". Use -Force parameter to overwrite if the target file already exists.")
             } # if
 
         } # if
@@ -292,3 +327,34 @@ function New-ISOFile {
     } # end
 
 } # function
+
+# Function to open file dialog to select one or multiple source files
+function Select-Files {
+    $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $fileDialog.InitialDirectory = [System.Environment]::GetFolderPath('Desktop')
+    $fileDialog.Filter = "All files (*.*)|*.*"
+    $fileDialog.Multiselect = $false
+    $fileDialog.Title = "Select File/Folder to Include in ISO"
+
+    if ($fileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        return $fileDialog.FileNames
+    } else {
+        return $null
+    }
+}
+
+# Function to open file dialog to select destination for saving the ISO
+function Select-Destination {
+    $saveFileDialog = New-Object System.Windows.Forms.SaveFileDialog
+    $saveFileDialog.InitialDirectory = [System.Environment]::GetFolderPath('Desktop')
+    $saveFileDialog.Filter = "ISO files (*.iso)|*.iso"
+    $saveFileDialog.DefaultExt = "iso"
+    $saveFileDialog.AddExtension = $true
+    $saveFileDialog.Title = "Destination to save to"
+
+    if ($saveFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        return $saveFileDialog.FileName
+    } else {
+        return $null
+    }
+}
