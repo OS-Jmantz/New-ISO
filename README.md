@@ -12,3 +12,9 @@
     - Added file open and save dialogues
     - Auto truncate -title parameter and remove non-alphanumeric characters
     - Simplified paramater names and module name for less keyboard travel
+
+# Usage:
+
+  `Import-Module New-Iso.ps1`
+  `New-ISO`
+  Choose source files, choose a destination and filename, and done!
