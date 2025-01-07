@@ -1,63 +1,33 @@
 function New-ISO {
     <#
     .SYNOPSIS
-        Create an ISO file from a source folder.
+        Create an ISO file from files or folders.
 
     .DESCRIPTION
-        Create an ISO file from a source folder.
-        Optionally specify a boot image and media type.
-
-        Based on original function by Chris Wu.
-        https://gallery.technet.microsoft.com/scriptcenter/New-ISO-function-a8deeffd (link appears to be no longer valid.)
-
-        Further based on new module by Alistair McNair.
-        https://github.com/TheDotSource/New-ISOFile
-
-        Changes:
-            - Added file open and save dialogues
-            - Auto truncate -title parameter and remove non-alphanumeric characters
-            - Simplified paramater names and module name for less keyboard travel
+        Create an ISO file from selected files or folders.
+        Uses a GUI interface for file/folder selection if no source is specified.
 
     .PARAMETER source
-        The source folder to add to the ISO. If not specified, a file selection dialog will open.
+        The source files/folder to add to the ISO. If not specified, a file selection dialog will open.
 
     .PARAMETER destination
         The ISO file to create. If not specified, a file save dialog will open.
 
-    .PARAMETER bootFile
-        Optional. Boot file to add to the ISO.
-
-    .PARAMETER media
-        Optional. The media type of the resulting ISO (BDR, CDR etc). Defaults to DVDPLUSRW_DUALLAYER.
-
     .PARAMETER title
-        Optional. Title of the ISO file. Defaults to the filename provided in -destination, truncated to 15 characters and without spaces or non-alphanumeric characters.
+        Optional. Title of the ISO file. Defaults to the filename provided in -destination.
 
     .PARAMETER force
         Optional. Force overwrite of an existing ISO file.
 
-    .INPUTS
-        None.
+    .EXAMPLE
+        New-ISO
 
-    .OUTPUTS
-        None.
+        Opens file/folder selection dialog and save dialog to create an ISO interactively.
 
     .EXAMPLE
-        New-ISO -source c:\forIso\ -destination C:\ISOs\testiso.iso
+        New-ISO -source C:\MyFiles -destination C:\Output\archive.iso
 
-        Simple example. Create testiso.iso with the contents from c:\forIso
-
-    .EXAMPLE
-        New-ISO -source f:\ -destination C:\ISOs\windowsServer2019Custom.iso -bootFile F:\efi\microsoft\boot\efisys.bin -title "Windows2019"
-
-        Example building Windows media. Add the contents of f:\ to windowsServer2019Custom.iso. Use efisys.bin to make the disc bootable.
-
-    .LINK
-
-    .NOTES
-        01           Alistair McNair          Initial version.
-        02           Jimmy Mantz              Add new features
-
+        Creates archive.iso containing the contents of C:\MyFiles.
     #>
 
     [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact="Low")]
@@ -67,11 +37,6 @@ function New-ISO {
         [string]$source,
         [parameter(Mandatory=$false,ValueFromPipeline=$false)]
         [string]$destination,
-        [parameter(Mandatory=$false,ValueFromPipeline=$false)]
-        [string]$bootFile = $null,
-        [Parameter(Mandatory=$false,ValueFromPipeline=$false)]
-        [ValidateSet("CDR","CDRW","DVDRAM","DVDPLUSR","DVDPLUSRW","DVDPLUSR_DUALLAYER","DVDDASHR","DVDDASHRW","DVDDASHR_DUALLAYER","DISK","DVDPLUSRW_DUALLAYER","BDR","BDRE")]
-        [string]$media = "DVDPLUSRW_DUALLAYER",
         [Parameter(Mandatory=$false,ValueFromPipeline=$false)]
         [string]$title,
         [Parameter(Mandatory=$false,ValueFromPipeline=$false)]
@@ -80,47 +45,46 @@ function New-ISO {
 
     begin {
         Add-Type -AssemblyName System.Windows.Forms
+        $script:proceedWithISO = $true  # Flag to control if we should proceed with ISO creation
 
-        # If -source is not provided, open the file selection dialog
+        # If -source is not provided, open the selection dialog
         if (-not $PSBoundParameters.ContainsKey('source')) {
-            $sourceFiles = Select-Files
-            if ($sourceFiles -ne $null) {
-                $source = $sourceFiles -join ";"
-            } else {
-                Write-Host "No source files selected, exiting." -ForegroundColor Green
-                break
+            $script:selectedPaths = Select-Files
+            if ($null -eq $selectedPaths) {
+                Write-Host "No source selected, exiting." -ForegroundColor Green
+                $script:proceedWithISO = $false
+                return
             }
+            $source = "GUI_SELECTION"  # Special flag to indicate GUI selection
         }
 
         # If -destination is not provided, open the file save dialog
-        if (-not $PSBoundParameters.ContainsKey('destination')) {
+        if ($proceedWithISO -and -not $PSBoundParameters.ContainsKey('destination')) {
             $destinationFile = Select-Destination
-            if ($destinationFile -ne $null) {
-                $destination = $destinationFile
-            } else {
+            if ($null -eq $destinationFile) {
                 Write-Host "No destination selected, exiting." -ForegroundColor Green
-                break
+                $script:proceedWithISO = $false
+                return
             }
+            $destination = $destinationFile
         }
 
         # If -title is not provided, generate it from the destination filename
-        if (-not $PSBoundParameters.ContainsKey('title')) {
-            # Extract the filename from the destination path
-            $filename = [System.IO.Path]::GetFileNameWithoutExtension($destination)
-            # Remove non-alphanumeric characters and spaces
-            $filename = $filename -replace '[^a-zA-Z0-9]', ''
-            # Truncate to 15 characters
-            $title = $filename.Substring(0, [Math]::Min(15, $filename.Length))
+        if ($proceedWithISO -and -not $PSBoundParameters.ContainsKey('title')) {
+            $title = [System.IO.Path]::GetFileNameWithoutExtension($destination)
         }
 
-        Write-Verbose ("Function start.")
+        if ($proceedWithISO) {
+            Write-Verbose ("Function start.")
+        }
     }
 
     process {
-
-        Write-Verbose ("Processing nested system " + $vmName)
-
-        ## Set type definition
+        if (-not $proceedWithISO) {
+            return
+        }
+        
+        ## Set type definition for ISO creation
         Write-Verbose ("Adding ISOFile type.")
 
         $typeDefinition = @'
@@ -136,211 +100,183 @@ function New-ISO {
                     while (TotalBlocks-- > 0) {
                         i.Read(buf, BlockSize, ptr); o.Write(buf, 0, bytes);
                     }
-
                     o.Flush(); o.Close();
                 }
             }
         }
 '@
 
-        ## Create type ISOFile, if not already created. Different actions depending on PowerShell version
+        ## Create type ISOFile if not already created
         if (!('ISOFile' -as [type])) {
-
-            ## Add-Type works a little differently depending on PowerShell version.
-            ## https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/add-type
             switch ($PSVersionTable.PSVersion.Major) {
-
-                ## 7 and (hopefully) later versions
+                ## PowerShell 7 and later
                 {$_ -ge 7} {
                     Write-Verbose ("Adding type for PowerShell 7 or later.")
-                    Add-Type -CompilerOptions "/unsafe" -TypeDefinition $typeDefinition
-                } # PowerShell 7
-
-                ## 5, and only 5. We aren't interested in previous versions.
+                    Add-Type -TypeDefinition $typeDefinition -CompilerOptions "/unsafe"
+                }
+                ## PowerShell 5
                 5 {
                     Write-Verbose ("Adding type for PowerShell 5.")
                     $compOpts = New-Object System.CodeDom.Compiler.CompilerParameters
                     $compOpts.CompilerOptions = "/unsafe"
-
-                    Add-Type -CompilerParameters $compOpts -TypeDefinition $typeDefinition
-                } # PowerShell 5
-
+                    Add-Type -TypeDefinition $typeDefinition -CompilerParameters $compOpts
+                }
                 default {
-                    ## If it's not 7 or later, and it's not 5, then we aren't doing it.
                     throw ("Unsupported PowerShell version.")
-
-                } # default
-
-            } # switch
-
-        } # if
-
-
-        ## Add boot file to image
-        if ($bootFile) {
-
-            Write-Verbose ("Optional boot file " + $bootFile + " has been specified.")
-
-            ## Display warning if Blu Ray media is used with a boot file.
-            ## Not sure why this doesn't work.
-            if(@('BDR','BDRE') -contains $media) {
-                    Write-Warning ("Selected boot image may not work with BDR/BDRE media types.")
-            } # if
-
-            if (!(Test-Path -Path $bootFile)) {
-                throw ($bootFile + " is not valid.")
-            } # if
-
-            ## Set stream type to binary and load in boot file
-            Write-Verbose ("Loading boot file.")
-
-            try {
-                $stream = New-Object -ComObject ADODB.Stream -Property @{Type=1} -ErrorAction Stop
-                $stream.Open()
-                $stream.LoadFromFile((Get-Item -LiteralPath $bootFile).Fullname)
-
-                Write-Verbose ("Boot file loaded.")
-            } # try
-            catch {
-                throw ("Failed to open boot file. " + $_.exception.message)
-            } # catch
-
-
-            ## Apply the boot image
-            Write-Verbose ("Applying boot image.")
-
-            try {
-                $boot = New-Object -ComObject IMAPI2FS.BootOptions -ErrorAction Stop
-                $boot.AssignBootImage($stream)
-
-                Write-Verbose ("Boot image applied.")
-            } # try
-            catch {
-                throw ("Failed to apply boot file. " + $_.exception.message)
-            } # catch
-
-
-            Write-Verbose ("Boot file applied.")
-
-        }  # if
-
-        ## Build array of media types
-        $mediaType = @(
-            "UNKNOWN",
-            "CDROM",
-            "CDR",
-            "CDRW",
-            "DVDROM",
-            "DVDRAM",
-            "DVDPLUSR",
-            "DVDPLUSRW",
-            "DVDPLUSR_DUALLAYER",
-            "DVDDASHR",
-            "DVDDASHRW",
-            "DVDDASHR_DUALLAYER",
-            "DISK",
-            "DVDPLUSRW_DUALLAYER",
-            "HDDVDROM",
-            "HDDVDR",
-            "HDDVDRAM",
-            "BDROM",
-            "BDR",
-            "BDRE"
-        )
-
-        Write-Verbose ("Selected media type is " + $media + " with value " + $mediaType.IndexOf($media))
-
-        ## Initialise image
-        Write-Verbose ("Initialising image object.")
-        try {
-            $image = New-Object -ComObject IMAPI2FS.MsftFileSystemImage -Property @{VolumeName=$title} -ErrorAction Stop
-            $image.ChooseImageDefaultsForMediaType($mediaType.IndexOf($media))
-
-            Write-Verbose ("initialised.")
-        } # try
-        catch {
-            throw ("Failed to initialise image. " + $_.exception.Message)
-        } # catch
-
-
-        ## Create target ISO, throw if file exists and -force parameter is not used.
-        if ($PSCmdlet.ShouldProcess($destination)) {
-
-            if (!($targetFile = New-Item -Path $destination -ItemType File -Force:$Force -ErrorAction SilentlyContinue)) {
-                throw ("Cannot create file " + $destination + ". Use -Force parameter to overwrite if the target file already exists.")
-            } # if
-
-        } # if
-
-
-        ## Get source content from specified path
-        Write-Verbose ("Fetching items from source directory.")
-        try {
-            $sourceItems = Get-ChildItem -LiteralPath $source -ErrorAction Stop
-            Write-Verbose ("Got source items.")
-        } # try
-        catch {
-            throw ("Failed to get source items. " + $_.exception.message)
-        } # catch
-
-
-        ## Add these to our image
-        Write-Verbose ("Adding items to image.")
-
-        foreach($sourceItem in $sourceItems) {
-
-            try {
-                $image.Root.AddTree($sourceItem.FullName, $true)
-            } # try
-            catch {
-                throw ("Failed to add " + $sourceItem.fullname + ". " + $_.exception.message)
-            } # catch
-
-        } # foreach
-
-        ## Add boot file, if specified
-        if ($boot) {
-            Write-Verbose ("Adding boot image.")
-            $Image.BootImageOptions = $boot
+                }
+            }
         }
 
-        ## Write out ISO file
-        Write-Verbose ("Writing out ISO file to " + $targetFile)
+        ## Initialize image object
+        Write-Verbose ("Initializing image object.")
+        try {
+            $image = New-Object -ComObject IMAPI2FS.MsftFileSystemImage -Property @{VolumeName=$title} -ErrorAction Stop
+            Write-Verbose ("Initialized.")
+        }
+        catch {
+            throw ("Failed to initialize image. " + $_.exception.Message)
+        }
 
+        ## Create target ISO file
+        if ($PSCmdlet.ShouldProcess($destination)) {
+            if (!($targetFile = New-Item -Path $destination -ItemType File -Force:$Force -ErrorAction SilentlyContinue)) {
+                throw ("Cannot create file " + $destination + ". Use -Force parameter to overwrite if the target file already exists.")
+            }
+        }
+
+        ## Get source content
+        Write-Verbose ("Fetching source items.")
+        try {
+            $sourceItems = @()
+            
+            if ($source -eq "GUI_SELECTION") {
+                # Handle GUI-selected paths
+                foreach ($path in $selectedPaths) {
+                    if (Test-Path -Path $path -PathType Container) {
+                        # If it's a directory, add the folder itself
+                        $sourceItems += Get-Item -LiteralPath $path -ErrorAction Stop
+                    } else {
+                        # If it's a file, get the item directly
+                        $sourceItems += Get-Item -LiteralPath $path -ErrorAction Stop
+                    }
+                }
+            } else {
+                # Handle command-line specified path
+                if (Test-Path -Path $source -PathType Container) {
+                    # Add the folder itself
+                    $sourceItems += Get-Item -LiteralPath $source -ErrorAction Stop
+                } else {
+                    $sourceItems += Get-Item -LiteralPath $source -ErrorAction Stop
+                }
+            }
+
+            if ($sourceItems.Count -eq 0) {
+                throw "No source items found to add to the ISO."
+            }
+
+            Write-Verbose ("Got source items.")
+        }
+        catch {
+            throw ("Failed to get source items. " + $_.exception.message)
+        }
+
+        ## Add items to image
+        Write-Verbose ("Adding items to image.")
+        foreach($sourceItem in $sourceItems) {
+            try {
+                if ($sourceItem.PSIsContainer) {
+                    # For folders, preserve the entire directory structure
+                    Write-Verbose ("Adding folder and contents: " + $sourceItem.FullName)
+                    $image.Root.AddTree($sourceItem.FullName, $true)
+                } else {
+                    # For individual files, add directly to root
+                    Write-Verbose ("Adding file: " + $sourceItem.FullName)
+                    $image.Root.AddTree($sourceItem.FullName, $false)
+                }
+            }
+            catch {
+                throw ("Failed to add " + $sourceItem.fullname + ". " + $_.exception.message)
+            }
+        }
+
+        ## Create the ISO file
+        Write-Verbose ("Writing ISO file to " + $targetFile)
         try {
             $result = $image.CreateResultImage()
-            [ISOFile]::Create($targetFile.FullName,$result.ImageStream,$result.BlockSize,$result.TotalBlocks)
-        } # try
+            [ISOFile]::Create($targetFile.FullName, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+        }
         catch {
             throw ("Failed to write ISO file. " + $_.exception.Message)
-        } # catch
+        }
 
         Write-Verbose ("File complete.")
-
-        ## Return file details
         return $targetFile
-
-    } # process
+    }
 
     end {
         Write-Verbose ("Function complete.")
-    } # end
-
-} # function
-
-# Function to open file dialog to select one or multiple source files
-function Select-Files {
-    $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
-    $fileDialog.InitialDirectory = [System.Environment]::GetFolderPath('Desktop')
-    $fileDialog.Filter = "All files (*.*)|*.*"
-    $fileDialog.Multiselect = $false
-    $fileDialog.Title = "Select File/Folder to Include in ISO"
-
-    if ($fileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        return $fileDialog.FileNames
-    } else {
-        return $null
     }
+}
+
+# Function to open dialog to select files or folder
+function Select-Files {
+    # Create buttons for selection type
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Select Files or Folder"
+    $form.Size = New-Object System.Drawing.Size(300,150)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    $filesButton = New-Object System.Windows.Forms.Button
+    $filesButton.Location = New-Object System.Drawing.Point(75,20)
+    $filesButton.Size = New-Object System.Drawing.Size(150,30)
+    $filesButton.Text = "Select Files"
+    
+    $folderButton = New-Object System.Windows.Forms.Button
+    $folderButton.Location = New-Object System.Drawing.Point(75,60)
+    $folderButton.Size = New-Object System.Drawing.Size(150,30)
+    $folderButton.Text = "Select Folder"
+
+    $script:result = $null  # Use script scope
+
+    # Files button click handler
+    $filesButton.Add_Click({
+        $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
+        $fileDialog.InitialDirectory = [System.Environment]::GetFolderPath('Desktop')
+        $fileDialog.Filter = "All files (*.*)|*.*"
+        $fileDialog.Multiselect = $true
+        $fileDialog.Title = "Select Files to Include in ISO"
+
+        if ($fileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:result = $fileDialog.FileNames
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $form.Close()
+        }
+    })
+
+    # Folder button click handler
+    $folderButton.Add_Click({
+        $folderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $folderDialog.Description = "Select Folder to Include in ISO"
+        $folderDialog.ShowNewFolderButton = $true
+        
+        if ($folderDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:result = $folderDialog.SelectedPath
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $form.Close()
+        }
+    })
+
+    # Add buttons to form
+    $form.Controls.Add($filesButton)
+    $form.Controls.Add($folderButton)
+
+    # Show form as dialog
+    $form.ShowDialog() | Out-Null
+
+    return $script:result
 }
 
 # Function to open file dialog to select destination for saving the ISO
@@ -350,7 +286,7 @@ function Select-Destination {
     $saveFileDialog.Filter = "ISO files (*.iso)|*.iso"
     $saveFileDialog.DefaultExt = "iso"
     $saveFileDialog.AddExtension = $true
-    $saveFileDialog.Title = "Destination to save to"
+    $saveFileDialog.Title = "Select Destination to Save ISO"
 
     if ($saveFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         return $saveFileDialog.FileName
